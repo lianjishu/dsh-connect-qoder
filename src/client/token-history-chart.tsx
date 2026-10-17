@@ -2,15 +2,14 @@
  * 迷你柱状图 — 7 天 token 消耗趋势。
  *
  * SVG 手绘（DSH 的 UI 组件库没有图表组件）。柱高按当天 token 数占 7 天最大值的比例，
- * 颜色按消耗量分三档：低（绿）、中（黄）、高（红）。底部标注周总量与日均。
+ * 颜色按消耗量分三档：低（绿）、中（蓝）、高（橙）。底部标注周总量与日均。
  *
  * 数据源：`tokensHistory`（host 下发的过去 7 天每日记录，按 day 升序）。
+ *
+ * 无障碍：SVG 整体 role="img" + aria-label；每根柱子带 <title>（日期 + 数值）。
+ * 宽度使用 viewBox + width="100%" 自适应容器。
  */
-export interface TokenDayRecord {
-  day: string
-  total: number
-  cached: number
-}
+import { formatTokenCount, type TokenDayRecord } from './card-model.ts'
 
 export interface TokenHistoryChartProps {
   history: TokenDayRecord[]
@@ -47,22 +46,15 @@ function trendArrow(history: TokenDayRecord[]): 'up' | 'down' | 'flat' | null {
   return diff > 0 ? 'up' : 'down'
 }
 
-/** 趋势百分比。 */
-function trendPercent(history: TokenDayRecord[]): number {
-  if (history.length < 2) return 0
+/** 趋势百分比。昨天为 0 时不编造分母不存在的百分比，返回 null。 */
+function trendPercent(history: TokenDayRecord[]): number | null {
+  if (history.length < 2) return null
   const yesterday = history[history.length - 2]
   const today = history[history.length - 1]
-  if (!yesterday || !today) return 0
-  if (yesterday.total === 0) return 100
+  if (!yesterday || !today) return null
+  if (yesterday.total === 0) return null
   const diff = today.total - yesterday.total
   return Math.round((diff / yesterday.total) * 100)
-}
-
-/** 格式化 token 数：小于 1 万用千分位，否则用 k/m。 */
-function formatCount(n: number): string {
-  if (n < 10000) return n.toLocaleString()
-  if (n < 1000000) return `${(n / 1000).toFixed(1)}k`
-  return `${(n / 1000000).toFixed(1)}m`
 }
 
 export function TokenHistoryChart({ history, t }: TokenHistoryChartProps) {
@@ -86,18 +78,25 @@ export function TokenHistoryChart({ history, t }: TokenHistoryChartProps) {
         <span style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
           {trend === 'up' ? (
             <span style={{ color: 'var(--dsw-alias-state-warn-primary, #e8850c)' }}>
-              {t('usage.tokensTrendUp', { pct: trendPct })}
+              {trendPct !== null ? t('usage.tokensTrendUp', { pct: trendPct }) : '↑'}
             </span>
           ) : trend === 'down' ? (
             <span style={{ color: 'var(--dsw-alias-state-success-primary, #22c55e)' }}>
-              {t('usage.tokensTrendDown', { pct: Math.abs(trendPct) })}
+              {trendPct !== null ? t('usage.tokensTrendDown', { pct: Math.abs(trendPct) }) : '↓'}
             </span>
           ) : trend === 'flat' ? (
             <span style={{ opacity: 0.5 }}>{t('usage.tokensTrendFlat')}</span>
           ) : null}
         </span>
       </div>
-      <svg width={chartWidth} height={chartHeight} style={{ display: 'block' }}>
+      <svg
+        width="100%"
+        viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+        height={chartHeight}
+        role="img"
+        aria-label={t('usage.tokensHistoryTitle')}
+        style={{ display: 'block' }}
+      >
         {history.map((r, i) => {
           const ratio = r.total / max
           const barHeight = Math.max(2, ratio * chartHeight)
@@ -112,13 +111,15 @@ export function TokenHistoryChart({ history, t }: TokenHistoryChartProps) {
               height={barHeight}
               rx={2}
               fill={barColorForRatio(ratio)}
-            />
+            >
+              <title>{`${r.day}: ${formatTokenCount(r.total)} tokens`}</title>
+            </rect>
           )
         })}
       </svg>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, opacity: 0.6 }}>
-        <span>{t('usage.tokensWeeklyTotal', { total: formatCount(total) })}</span>
-        <span>{t('usage.tokensDailyAvg', { avg: formatCount(avg) })}</span>
+        <span>{t('usage.tokensWeeklyTotal', { total: formatTokenCount(total) })}</span>
+        <span>{t('usage.tokensDailyAvg', { avg: formatTokenCount(avg) })}</span>
       </div>
     </div>
   )

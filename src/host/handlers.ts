@@ -221,6 +221,7 @@ export interface UsageDeps {
   tokenCounter?: {
     read(region: string): { total: number | null; cached: number | null; day: string | null }
     readHistory(region: string, days?: number): { day: string; total: number; cached: number }[]
+    gc(now?: number): void
   }
 }
 
@@ -285,6 +286,8 @@ export async function usageHandler(
           if (history.length > 0) {
             requestsField.tokensHistory = history
           }
+          // 顺带清理过期旧文件（7 天窗口之外的 token 计数文件）。
+          tokenCounter.gc()
         }
         return usage === undefined
           ? { ...base, available: false, ...requestsField }

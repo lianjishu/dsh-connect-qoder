@@ -129,8 +129,18 @@ export interface CardUsageRegion {
 	 * 本地口径：过去 7 天每日 token 消耗历史，按 day 升序排列。供客户端渲染
 	 * 柱状图、计算周总量与日均。
 	 */
-	tokensHistory?: { day: string; total: number; cached: number }[]
+	tokensHistory?: TokenDayRecord[]
 	[key: string]: unknown
+}
+
+/** 一天的 token 消耗记录（多日历史用）。 */
+export interface TokenDayRecord {
+	/** 本地日历日（YYYY-MM-DD）。 */
+	day: string
+	/** 当日经本客户端累计消耗的 token 总数。 */
+	total: number
+	/** 当日经本客户端累计命中的缓存 token 数。 */
+	cached: number
 }
 
 /** One quota bucket, in either the base or the add-on slot. */

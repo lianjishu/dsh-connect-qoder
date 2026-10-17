@@ -28,6 +28,9 @@
  *   分量返回 `null`（不计数、不写盘），绝不拼出目录外的路径。
  * - **永不抛**：读不到 / 写失败一律降级为「不可用」（`count === null`），不
  *   阻塞对话、不给用户假的成功读数。
+ * - **原子性**：所有 fs 操作为同步（readFileSync / writeFileSync / renameSync），
+ *   Node.js 单线程模型保证单次 addUsage 的读-改-写在同一 tick 内完成，不会被
+ *   另一条流的 addUsage 打断——不存在并发写丢更新的竞态。
  *
  * @module dsh-connect-qoder/token-counter
  */
@@ -38,7 +41,7 @@ import { localDayKey, sanitizeComponent } from './request-counter.ts'
 /** 落盘 JSON 的版本号；与 `request-counter.ts` 同约定，读错版本即丢弃。 */
 const TOKEN_FORMAT_VERSION = 1
 
-/** 一天毫秒数，用于零点翻页与 GC 窗口。 */
+/** 一天毫秒数，用于 GC 窗口。 */
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /** 计数器对外暴露的读数：今日消耗的 token 与缓存命中，或 `null`（本地口径不可用）。 */
@@ -73,6 +76,35 @@ export interface TokenCounterOptions {
   keepDays?: number
 }
 
+/** 已解析的日文件数据（内部用）。 */
+interface ParsedDayFile {
+  total: number
+  cached: number
+}
+
+/**
+ * 读取并解析单个日文件。所有读路径（read / readHistory / write）共用此函数，
+ * 避免重复的 version 检查 + Number 收敛 + floor 逻辑。
+ *
+ * @param path - 文件绝对路径。
+ * @returns 解析后的 {total, cached}；文件不存在 / 版本不符 / 损坏 / 非有限数 → `null`。
+ */
+function parseDayFile(path: string): ParsedDayFile | null {
+  if (!existsSync(path)) return null
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
+    const record = parsed as { version?: unknown; total?: unknown; cached?: unknown }
+    if (record?.version !== TOKEN_FORMAT_VERSION) return null
+    const total = Number(record.total)
+    const cached = Number(record.cached)
+    if (!Number.isFinite(total) || total < 0) return null
+    const cachedValue = Number.isFinite(cached) && cached >= 0 ? Math.floor(cached) : 0
+    return { total: Math.floor(total), cached: cachedValue }
+  } catch {
+    return null
+  }
+}
+
 /**
  * 把上游 usage 帧里的 token 数收敛成本累加器认识的增量。
  *
@@ -100,6 +132,9 @@ export function tokensFromUsage(usage: unknown): { total: number; cached: number
  *
  * 一个 region 一个实例；文件按 `region + 本地日` 分文件，零点翻页自动切文件。
  * 所有磁盘操作吞错降级，绝不把计数失败传导到对话链路。
+ *
+ * 所有 fs 操作为同步，Node.js 单线程模型保证单次 addUsage 的读-改-写在同一
+ * tick 内完成——两条并发流的 addUsage 不会互相打断，不存在并发写丢更新的竞态。
  */
 export class TokenCounter {
   private basePath: (filename: string) => string
@@ -115,14 +150,16 @@ export class TokenCounter {
   }
 
   /**
-   * 当前 region + 本地日的计数文件路径；任一分量非法返回 `null`（越界防护）。
+   * 当前 region + 本地日的计数文件路径与日期 key；任一分量非法返回 `null`。
+   * 一次取 day，避免 read() 里两次独立调用 localDayKey 在 23:59:59.999 跨零点时
+   * path 是旧日文件、返回的 day 是新日的错位。
    */
-  private pathFor(region: string): string | null {
+  private pathFor(region: string): { path: string; day: string } | null {
     const safeRegion = sanitizeComponent(region)
     if (safeRegion === null) return null
     const day = localDayKey(this.now())
     if (day === null) return null
-    return this.basePath(`.qoder-token-count.${safeRegion}.${day}.json`)
+    return { path: this.basePath(`.qoder-token-count.${safeRegion}.${day}.json`), day }
   }
 
   /**
@@ -132,22 +169,12 @@ export class TokenCounter {
    * @returns 读数；文件不存在 / 损坏 / 越界 / 时区不可用 → 全部 `null`。
    */
   read(region: string): TokenCountSnapshot {
-    const path = this.pathFor(region)
-    if (path === null) return { total: null, cached: null, day: null }
-    const day = localDayKey(this.now())
-    if (!existsSync(path)) return { total: null, cached: null, day }
-    try {
-      const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
-      const record = parsed as { version?: unknown; total?: unknown; cached?: unknown }
-      if (record?.version !== TOKEN_FORMAT_VERSION) return { total: null, cached: null, day }
-      const total = Number(record.total)
-      const cached = Number(record.cached)
-      if (!Number.isFinite(total) || total < 0) return { total: null, cached: null, day }
-      const cachedValue = Number.isFinite(cached) && cached >= 0 ? Math.floor(cached) : 0
-      return { total: Math.floor(total), cached: cachedValue, day }
-    } catch {
-      return { total: null, cached: null, day }
-    }
+    const resolved = this.pathFor(region)
+    if (resolved === null) return { total: null, cached: null, day: null }
+    const { path, day } = resolved
+    const parsed = parseDayFile(path)
+    if (parsed === null) return { total: null, cached: null, day }
+    return { total: parsed.total, cached: parsed.cached, day }
   }
 
   /**
@@ -156,6 +183,8 @@ export class TokenCounter {
    * 从 `now` 向前逐天扫描本地日历日文件，跳过不存在的日期与损坏文件。
    * 返回值按 day 升序排列（最早在前），客户端可据此渲染柱状图或趋势线。
    *
+   * 使用 Date 日历减法（setDate）而非固定 24h 步进，避免 DST 时区在一天扫描重复或跳过。
+   *
    * @param region - region id。
    * @param days - 回溯天数，默认 7；上限由 `keepDays` 隐式决定。
    * @returns 历史记录数组（可能为空）。
@@ -163,26 +192,19 @@ export class TokenCounter {
   readHistory(region: string, days: number = 7): TokenDayRecord[] {
     const safeRegion = sanitizeComponent(region)
     if (safeRegion === null) return []
-    const now = this.now()
     const records: TokenDayRecord[] = []
     const scannedDays = Math.min(days, this.keepDays)
+    const dateObj = new Date(this.now())
     for (let i = 0; i < scannedDays; i++) {
-      const day = localDayKey(now - i * DAY_MS)
-      if (day === null) continue
-      const path = this.basePath(`.qoder-token-count.${safeRegion}.${day}.json`)
-      if (!existsSync(path)) continue
-      try {
-        const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
-        const record = parsed as { version?: unknown; total?: unknown; cached?: unknown }
-        if (record?.version !== TOKEN_FORMAT_VERSION) continue
-        const total = Number(record.total)
-        const cached = Number(record.cached)
-        if (!Number.isFinite(total) || total < 0) continue
-        const cachedValue = Number.isFinite(cached) && cached >= 0 ? Math.floor(cached) : 0
-        records.push({ day, total: Math.floor(total), cached: cachedValue })
-      } catch {
-        // 损坏文件跳过，不影响其它天。
+      const day = localDayKey(dateObj.getTime())
+      if (day !== null) {
+        const path = this.basePath(`.qoder-token-count.${safeRegion}.${day}.json`)
+        const parsed = parseDayFile(path)
+        if (parsed !== null) {
+          records.push({ day, total: parsed.total, cached: parsed.cached })
+        }
       }
+      dateObj.setDate(dateObj.getDate() - 1)
     }
     // 按 day 升序排列（i 越大越早，所以反转）。
     return records.reverse()
@@ -216,26 +238,11 @@ export class TokenCounter {
     region: string,
     next: (prevTotal: number, prevCached: number) => { total: number; cached: number },
   ): TokenCountSnapshot {
-    const path = this.pathFor(region)
-    if (path === null) return { total: null, cached: null, day: null }
-    const day = localDayKey(this.now())
-    let total = 0
-    let cached = 0
-    if (existsSync(path)) {
-      try {
-        const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown
-        const record = parsed as { version?: unknown; total?: unknown; cached?: unknown }
-        if (record?.version === TOKEN_FORMAT_VERSION) {
-          const prevTotal = Number(record.total)
-          const prevCached = Number(record.cached)
-          if (Number.isFinite(prevTotal) && prevTotal >= 0) total = Math.floor(prevTotal)
-          if (Number.isFinite(prevCached) && prevCached >= 0) cached = Math.floor(prevCached)
-        }
-      } catch {
-        // 损坏文件：以 0 起写覆盖，不要因为旧文件坏了就丢这一轮的消耗。
-      }
-    }
-    const result = next(total, cached)
+    const resolved = this.pathFor(region)
+    if (resolved === null) return { total: null, cached: null, day: null }
+    const { path, day } = resolved
+    const prev = parseDayFile(path) ?? { total: 0, cached: 0 }
+    const result = next(prev.total, prev.cached)
     const tmp = `${path}.tmp`
     try {
       mkdirSync(dirname(path), { recursive: true })
@@ -268,8 +275,7 @@ export class TokenCounter {
   gc(now: number = this.now()): void {
     const dir = dirname(this.basePath('x'))
     if (!existsSync(dir)) return
-    const keepDays = this.keepDays
-    const cutoffDay = localDayKey(now - keepDays * DAY_MS)
+    const cutoffDay = localDayKey(now - this.keepDays * DAY_MS)
     if (cutoffDay === null) return
     let names: string[]
     try {
