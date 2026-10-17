@@ -42,7 +42,7 @@ import { localDayKey, sanitizeComponent } from './request-counter.ts'
 const TOKEN_FORMAT_VERSION = 1
 
 /** 一天毫秒数，用于 GC 窗口。 */
-const DAY_MS = 24 * 60 * 60 * 1000
+
 
 /** 计数器对外暴露的读数：今日消耗的 token 与缓存命中，或 `null`（本地口径不可用）。 */
 export interface TokenCountSnapshot {
@@ -172,7 +172,8 @@ export class TokenCounter {
     const resolved = this.pathFor(region)
     if (resolved === null) return { total: null, cached: null, day: null }
     const { path, day } = resolved
-    const parsed = parseDayFile(path)
+    // Formal file first; fallback to tmp (crash before renameSync = today's data is in tmp).
+    const parsed = parseDayFile(path) ?? parseDayFile(`${path}.tmp`)
     if (parsed === null) return { total: null, cached: null, day }
     return { total: parsed.total, cached: parsed.cached, day }
   }
@@ -199,10 +200,8 @@ export class TokenCounter {
       const day = localDayKey(dateObj.getTime())
       if (day !== null) {
         const path = this.basePath(`.qoder-token-count.${safeRegion}.${day}.json`)
-        const parsed = parseDayFile(path)
-        if (parsed !== null) {
-          records.push({ day, total: parsed.total, cached: parsed.cached })
-        }
+        const parsed = parseDayFile(path) ?? parseDayFile(`${path}.tmp`)
+        records.push({ day, total: parsed?.total ?? 0, cached: parsed?.cached ?? 0 })
       }
       dateObj.setDate(dateObj.getDate() - 1)
     }
@@ -241,7 +240,7 @@ export class TokenCounter {
     const resolved = this.pathFor(region)
     if (resolved === null) return { total: null, cached: null, day: null }
     const { path, day } = resolved
-    const prev = parseDayFile(path) ?? { total: 0, cached: 0 }
+    const prev = parseDayFile(path) ?? parseDayFile(`${path}.tmp`) ?? { total: 0, cached: 0 }
     const result = next(prev.total, prev.cached)
     const tmp = `${path}.tmp`
     try {
@@ -275,7 +274,10 @@ export class TokenCounter {
   gc(now: number = this.now()): void {
     const dir = dirname(this.basePath('x'))
     if (!existsSync(dir)) return
-    const cutoffDay = localDayKey(now - this.keepDays * DAY_MS)
+    // Use calendar subtraction (setDate) instead of 24h step, consistent with readHistory.
+    const cutoffDate = new Date(now)
+    cutoffDate.setDate(cutoffDate.getDate() - this.keepDays)
+    const cutoffDay = localDayKey(cutoffDate.getTime())
     if (cutoffDay === null) return
     let names: string[]
     try {
