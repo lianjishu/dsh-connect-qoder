@@ -287,7 +287,7 @@ export class TokenCounter {
       return
     }
     for (const name of names) {
-      const match = /^\.qoder-token-count\.([A-Za-z0-9_-]+)\.(\d{4}-\d{2}-\d{2})\.json$/.exec(name)
+      const match = /^\.qoder-token-count\.([A-Za-z0-9_-]+)\.(\d{4}-\d{2}-\d{2})\.json(\.tmp)?$/.exec(name)
       if (match === null) continue
       const fileDay = match[2] as string
       if (fileDay < cutoffDay) {

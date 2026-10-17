@@ -98,7 +98,8 @@ export const zhUsage = {
 	"usage.tokensDailyAvg": "日均 {avg}",
 	"usage.tokensTrendUp": "↑ 涨 {pct}%",
 	"usage.tokensTrendDown": "↓ 跌 {pct}%",
-	"usage.tokensTrendFlat": "— 持平"
+	"usage.tokensTrendFlat": "— 持平",
+	"usage.tokensDayTooltip": "{day}: {total} tokens"
 };
 /** English — usage panel copy. */
 export const enUsage = {
@@ -170,5 +171,6 @@ export const enUsage = {
 	"usage.tokensDailyAvg": "Avg {avg}",
 	"usage.tokensTrendUp": "↑ +{pct}%",
 	"usage.tokensTrendDown": "↓ −{pct}%",
-	"usage.tokensTrendFlat": "— flat"
+	"usage.tokensTrendFlat": "— flat",
+	"usage.tokensDayTooltip": "{day}: {total} tokens"
 };

@@ -93,6 +93,7 @@ export function TokenHistoryChart({ history, t }: TokenHistoryChartProps) {
         width="100%"
         viewBox={`0 0 ${chartWidth} ${chartHeight}`}
         height={chartHeight}
+        preserveAspectRatio="none"
         role="img"
         aria-label={t('usage.tokensHistoryTitle')}
         style={{ display: 'block' }}
@@ -112,7 +113,7 @@ export function TokenHistoryChart({ history, t }: TokenHistoryChartProps) {
               rx={2}
               fill={barColorForRatio(ratio)}
             >
-              <title>{`${r.day}: ${formatTokenCount(r.total)} tokens`}</title>
+              <title>{t('usage.tokensDayTooltip', { day: r.day, total: formatTokenCount(r.total) })}</title>
             </rect>
           )
         })}
