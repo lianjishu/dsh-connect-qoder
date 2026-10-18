@@ -201,6 +201,13 @@ dsh plugin --profile web add <本仓库路径>
   （比对请求自己的 `Host` 头，所以不写死端口、DSH 换端口也不用改），且必须是回环地址。
   判定在 [`src/host/routes.ts`](src/host/routes.ts) 的 `loopbackRequest`，由 `test/route-gates.test.js` 覆盖。
 - 依赖 Qoder 客户端接口（非官方开放 API），Qoder 更新后插件可能需要随之调整。
+- **卡片在「设置」左侧导航里有一个自己的入口**（`settings.section` 座席，`id: qoder`）：
+  这是宿主设置面板渲染左侧导航项的那个 list 槽位——第三方 bundle 可以占用它，本插件
+  从 0.7.0 之后的这一版开始注册。在此之前卡片只存在于「插件」页（`plugins.bundle.config`
+  / `plugins.row.config` 两个座席）与历史的 `settings.plugin.item`，因此要打开卡片必须
+  先进「插件」再点开本 bundle 或其行，**「设置」导航里看不到 Qoder**。
+  `id` 必须用自己的（复用宿主已发布的 id 会**替换**那一格而不是新增），
+  `label` 用 thunk 以便切换语言时重读。与其他第三方插件（如壁纸引擎）的写法一致。
 - **设置命名空间由宿主决定，不能自选**（0.2 代起）：`describe()` 用 Loader 条目
   id 作为 `ns`（本 bundle 是 `llm-qoder`，不是 `dsh-connect-qoder`），而「设置 → 模型」
   页按**精确匹配**查 `namespaces.get(entry.settingsNs)`。若插件宣告的命名空间与宿主实际
