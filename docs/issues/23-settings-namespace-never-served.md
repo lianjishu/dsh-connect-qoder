@@ -57,8 +57,33 @@
 > 否则用 fallback 拼法去服务时两个名字会相等，带 bug 也能通过。已做变异验证：
 > 改回"比对冻结的 `namespace`"立刻变红。
 >
-> 下文保留原始推理，作为"为什么只读一次快照会得出错误结论"的记录；
-> §修法 B（宿主侧 `configure()` 读回校验）仍然有效且已落地。
+> ### 第三次更正（第三次重启后：客户端已通，宿主侧同病）
+>
+> `07:29` 那次重启，renderer 里**不再有任何** Qoder 报错——客户端这半确认修好
+> （`servedRow()` 按 Loader id 找到了行，卡片拿到可写 scope）。
+>
+> 但宿主侧那条 warn 仍在，且触发点离激活只隔 **27ms**：
+>
+> ```text
+> 07:29:18.850  Qoder has no local sign-in; region not registered
+> 07:29:18.877  the settings namespace "llm-qoder" is absent from describe() ...
+> ```
+>
+> 那是 §修法 B 的读回校验，用的是 `queueMicrotask` —— 它在本插件自己的 fiber
+> 进入 ACTIVE **之前**就跑了，而 `describe()` 只收录 `fiber.state === 2` 的行。
+> **和客户端是同一个病**：快照是真的，时刻是错的。每次启动必误报。
+>
+> 修法：读回改为**等激活稳定后**再看（4s / 15s 两次，均 `unref` 以免吊住进程），
+> 并经 `ctx.effect` 登记 disposer 随 fiber 清理；报错文本同时**列出宿主实际服务的
+> 名字**——之前只说"缺失"、不列 22 条里的任何一条，正是它让"误报缺失"和"真的缺失"
+> 在日志里长得一样。
+>
+> 回归测试：`test/settings-readback-timing.test.js`（源码级，因 `src/host/index.ts`
+> 依赖 Cordis peer 无法直接 import，手法同 `test/config-schema.test.js`）：
+> 禁止 microtask、必须延迟、必须有 disposer、必须列出服务清单、必须精确匹配。
+> 已做变异验证：把 `queueMicrotask` 加回去立刻变红。
+>
+> 下文保留原始推理，作为"为什么只读一次快照会得出错误结论"的记录。
 
 ## 症状
 
