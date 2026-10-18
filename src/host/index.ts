@@ -1282,6 +1282,34 @@ async function activate(ctx: HostContext, config: Record<string, unknown>): Prom
     try {
       if (typeof settings.configure === 'function') {
         settings.configure({ auto: true }, ctx.fiber)
+        // `configure()` only registers a page policy; it does NOT create the
+        // namespace. The namespace a card can write to is whatever
+        // `describe()` lists, and `describe()` derives it from
+        // `entry.fiber.runtime.Config` — so a Loader row whose runtime carries
+        // no `Config` produces NO row, no matter how many presentations were
+        // configured. Read it back rather than assume, the same discipline
+        // `settings-save.ts` applies to writes: a confirmation that is not
+        // read out of the document is not a confirmation.
+        const servedNow = (): boolean => {
+          const describe = (settings as { describe?: () => unknown }).describe
+          if (typeof describe !== 'function') return false
+          try {
+            const rows = describe.call(settings) as Array<{ ns?: unknown }> | undefined
+            return Array.isArray(rows) && rows.some((row) => String(row?.ns) === settingsNs)
+          } catch {
+            return false
+          }
+        }
+        // `describe()` is populated on a microtask after `configure()`, so the
+        // check has to run after it — not on the same tick.
+        queueMicrotask(() => {
+          if (servedNow()) return
+          ctx.logger.warn?.(
+            `dsh-connect-qoder: the settings namespace "${settingsNs}" is absent from describe() ` +
+              `after configure(); the card will be read-only and every save would be refused with 503. ` +
+              `Set these fields declaratively in the profile patch instead (see README).`,
+          )
+        })
       } else {
         // The surface is present but carries no presentation API this plugin
         // knows: the configuration surface will not render, and saying so

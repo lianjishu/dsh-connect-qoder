@@ -66,11 +66,12 @@ assert.ok(
  * serve. Everything the card touches at load time is stubbed; the card body is
  * never rendered, only `apply()` is run.
  */
-function loadClient({ servedNamespace, servedNamespaces }) {
+function loadClient({ servedNamespace, servedNamespaces, captureSlots = false }) {
   const registered = []
   const bound = []
   const describeCalls = []
   const logged = []
+  const slots = []
 
   // `servedNamespaces` drives the multi-namespace case (a host serving rows that
   // are none of ours); `servedNamespace` keeps the single-row cases terse, and
@@ -106,8 +107,30 @@ function loadClient({ servedNamespace, servedNamespaces }) {
       },
     },
     slots: {
-      inject: () => undefined,
-      register: () => undefined,
+      // `inject(slotName, callback)` runs the callback to obtain a registration;
+      // the card's `registerCard` calls `ctx.slots.register({ …, inject }, Card)`.
+      // Capturing the `inject` payload is how a test observes whether the card
+      // was handed a writable `settingsScope` — the DOM-level consequence
+      // (save button enabled vs disabled) keys on exactly that value.
+      inject: (slotName, callback) => {
+        if (captureSlots) {
+          const registerWith = {
+            register: (slot) => {
+              slots.push({ slotName, inject: typeof slot.inject === 'function' ? slot.inject() : slot.inject })
+              return undefined
+            },
+            inject: () => undefined,
+          }
+          // The bundle calls `ctx.slots.register(...)` directly, not through a
+          // returned registrar, so route the capture through this object.
+          return callback()
+        }
+        return undefined
+      },
+      register: (slot) => {
+        if (captureSlots) slots.push({ slotName: slot.name, inject: typeof slot.inject === 'function' ? slot.inject() : slot.inject })
+        return undefined
+      },
     },
   }
 
@@ -154,7 +177,7 @@ function loadClient({ servedNamespace, servedNamespaces }) {
     console.error = realError
   }
 
-  return { registered, bound, describeCalls, logged }
+  return { registered, bound, describeCalls, logged, slots }
 }
 
 test('a host serving rows, none of them ours, is named instead of silently taken over', () => {
@@ -218,6 +241,50 @@ test('a host that serves nothing still yields a usable namespace', () => {
 
   assert.equal(registered[0].ns, 'dsh-connect-qoder')
   assert.deepEqual(bound, ['dsh-connect-qoder'])
+})
+
+/**
+ * The writable-scope gate, which used to be `forms.get(ns) !== undefined`.
+ *
+ * `forms.get()` answers an object for ANY namespace name — including one the
+ * host never created — so that test could not distinguish "served" from
+ * "asked for". The card therefore offered live controls whose every save the
+ * host refused (its `__save` finds no row in `describe()` and answers 503):
+ * a switch that renders, toggles, and never lands.
+ *
+ * These two cases pin the gate to `describe()`, which is the list the host
+ * actually serves from.
+ */
+test('a namespace the host does not serve leaves the card read-only', () => {
+  const { slots } = loadClient({
+    // The host is up and serving rows — just not ours. This is the real
+    // DSH NEXT 2.0.19 shape: 21 namespaces, none named `llm-qoder`.
+    servedNamespaces: ['llm-pi-ai', 'agent-loop', 'ui-chat'],
+    captureSlots: true,
+  })
+
+  const withScope = slots.filter((s) => s.inject?.settingsScope !== undefined)
+  assert.deepEqual(
+    withScope.map((s) => s.slotName),
+    [],
+    'the card was handed a settings scope for a namespace the host does not serve — ' +
+      'every save through it is refused with 503, so the controls must stay read-only',
+  )
+
+  const withCopy = slots.filter((s) => s.inject?.t !== undefined)
+  assert.ok(withCopy.length > 0, 'the card must still register (degraded, not broken)')
+})
+
+test('a served namespace does hand the card its settings scope', () => {
+  // The other direction, or the gate above could be satisfied by never
+  // granting a scope at all — which would make the card permanently read-only.
+  const { slots } = loadClient({ servedNamespace: HOST_NAMESPACE, captureSlots: true })
+
+  const withScope = slots.filter((s) => s.inject?.settingsScope !== undefined)
+  assert.ok(
+    withScope.length > 0,
+    `no slot received a settingsScope even though "${HOST_NAMESPACE}" is served; got ${JSON.stringify(slots.map((s) => s.slotName))}`,
+  )
 })
 
 test('every key the card can ask for is present, in both languages', () => {

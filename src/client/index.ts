@@ -160,17 +160,64 @@ function apply(ctx: ClientContext) {
 	}), "dsh-connect-qoder: settings copy");
 	const t = ctx.locale.bind(namespace);
 	let settingsScope: SettingsScope | undefined;
-	// The settings surface, narrowed to the one call it is probed with.
+	// The settings surface, narrowed to the calls it is probed with.
 	// `SettingsScope` is this card's own type (declared with the card), so
 	// the cast below is where the harness's answer meets it — the same
 	// division of labour as the `unknown` above, kept to one line.
-	const forms = softGet("configForms") as { get(ns: string): unknown } | undefined;
-	if (forms !== void 0) {
-		settingsScope = forms.get(namespace) as SettingsScope;
+	const forms = softGet("configForms") as
+		| {
+				get(ns: string): unknown
+				describe(): { getSnapshot(): { view?: { namespaces?: unknown[] } } }
+		  }
+		| undefined;
+	/**
+	 * Whether the host actually SERVES this plugin's namespace.
+	 *
+	 * `forms.get(ns)` is not a servability test: it answers an object for any
+	 * namespace name, including one the host never created. Using it as the
+	 * writability gate made the card offer live controls whose every save is
+	 * refused — the host's `__save` finds no row in `describe()` and answers
+	 * 503, so the user sees a switch that renders, toggles, and never lands.
+	 *
+	 * `describe()` is the authority: it lists exactly the active profile
+	 * entries that produced a volatile form. A namespace missing from that
+	 * list has nothing to persist into, so the card must stay read-only —
+	 * the degraded path this file already had, now actually reachable.
+	 */
+	const namespaceServed = (): { served: boolean; hostRows: number } => {
+		if (forms === void 0) return { served: false, hostRows: 0 };
+		try {
+			const namespaces = forms.describe().getSnapshot().view?.namespaces ?? [];
+			const served = namespaces.some((entry) => {
+				// Rows are `{ ns, ... }`; any other shape is not a match.
+				const ns = (entry as { ns?: unknown } | null | undefined)?.ns;
+				return typeof ns === 'string' && ns === namespace;
+			});
+			return { served, hostRows: namespaces.length };
+		} catch {
+			// A describe() that throws cannot prove the namespace exists, and a
+			// speculative writable card is the defect this guard exists to stop.
+			return { served: false, hostRows: 0 };
+		}
+	};
+	const { served, hostRows } = namespaceServed();
+	if (served) {
+		settingsScope = forms?.get(namespace) as SettingsScope;
+	} else if (hostRows > 0) {
+		// A host serving OTHER rows while ours is missing is the anomaly worth
+		// naming: the card would offer controls whose every save is refused
+		// (the host's `__save` finds no row and answers 503). A host serving an
+		// empty list is the ordinary Loader-less case and stays silent — the
+		// same rule `resolveNamespace` follows above.
+		console.error(
+			`[dsh-connect-qoder] the host serves ${hostRows} settings namespace(s) but not ` +
+				`"${namespace}"; the card stays read-only (its saves would be refused). ` +
+				`Set these fields declaratively in the profile patch instead — see README.`,
+		);
 	}
-	// A host without the surface gets a read-only card: `settingsScope` stays
-	// undefined and the slot registration degrades to `{ t }` — the existing
-	// degraded path, not an error.
+	// A host that does not serve the namespace gets a read-only card:
+	// `settingsScope` stays undefined and the slot registration degrades to
+	// `{ t }` — the existing degraded path, not an error.
 	/**
 	 * FIX 0.1.7: the plugin-manager detail page renders a bundle's config
 	 * card from the `plugins.bundle.config` slot (and a row's from
