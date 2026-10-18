@@ -1290,25 +1290,67 @@ async function activate(ctx: HostContext, config: Record<string, unknown>): Prom
         // configured. Read it back rather than assume, the same discipline
         // `settings-save.ts` applies to writes: a confirmation that is not
         // read out of the document is not a confirmation.
-        const servedNow = (): boolean => {
+        //
+        // WHEN the read-back happens is the whole correctness question here, and
+        // getting it wrong is what this code used to do. `describe()` admits a
+        // row only when `entry.fiber.state === 2` (ACTIVE). This callback runs
+        // INSIDE activation, so at this instant our own fiber is still settling:
+        // a `queueMicrotask` read lands before that transition and reports the
+        // row absent on every single boot, for a plugin whose row then appears
+        // moments later. That is the same mistake the client half made with its
+        // boot-time `describe()` read (docs/issues/23): a TRUE snapshot of the
+        // wrong instant.
+        //
+        // So the check waits for activation to settle, then looks once. It also
+        // reports the served names, not just an absence — "the row is missing"
+        // without the list is what made the earlier false alarm unreadable.
+        const describeRows = (): string[] | undefined => {
           const describe = (settings as { describe?: () => unknown }).describe
-          if (typeof describe !== 'function') return false
+          if (typeof describe !== 'function') return undefined
           try {
             const rows = describe.call(settings) as Array<{ ns?: unknown }> | undefined
-            return Array.isArray(rows) && rows.some((row) => String(row?.ns) === settingsNs)
+            if (!Array.isArray(rows)) return undefined
+            // Rows are `{ ns, … }`; anything else names no namespace and is not
+            // a candidate, rather than being coerced into a string.
+            return rows
+              .map((row) => (typeof row?.ns === 'string' ? row.ns : undefined))
+              .filter((ns): ns is string => ns !== undefined)
           } catch {
-            return false
+            return undefined
           }
         }
-        // `describe()` is populated on a microtask after `configure()`, so the
-        // check has to run after it — not on the same tick.
-        queueMicrotask(() => {
-          if (servedNow()) return
+        // `describe()` throws/answers nothing until the Loader has settled every
+        // entry, so a `describe` that is not callable yet is not evidence of a
+        // missing row; it is evidence that this host has no settings surface at
+        // all, which is the `warn` above's business, not this one's.
+        let reportedMissing = false
+        const checkServed = (): void => {
+          if (reportedMissing) return
+          const served = describeRows()
+          if (served === undefined) return
+          if (served.includes(settingsNs)) return
+          reportedMissing = true
           ctx.logger.warn?.(
             `dsh-connect-qoder: the settings namespace "${settingsNs}" is absent from describe() ` +
-              `after configure(); the card will be read-only and every save would be refused with 503. ` +
-              `Set these fields declaratively in the profile patch instead (see README).`,
+              `(served: ${served.join(', ')}); the card will be read-only and every save would be ` +
+              `refused with 503. Either the Loader row id in cordis.patch.yml drifted, or this host ` +
+              `derives no Config for the row. Set these fields declaratively in the profile patch instead (see README).`,
           )
+        }
+        // Two looks, both after activation has had time to settle: the first
+        // catches the ordinary case, the second a host whose Loader is slower
+        // than the timer. `unref` is defensive — this plugin must not hold the
+        // process open, and on a host that lacks it the timer is simply ordinary.
+        const firstLook = setTimeout(checkServed, 4000)
+        const secondLook = setTimeout(checkServed, 15000)
+        for (const timer of [firstLook, secondLook]) {
+          ;(timer as { unref?: () => void }).unref?.()
+        }
+        // Registered through the plugin's own effect so the timers die with the
+        // fiber instead of firing into a disposed context.
+        ctx.effect(() => () => {
+          clearTimeout(firstLook)
+          clearTimeout(secondLook)
         })
       } else {
         // The surface is present but carries no presentation API this plugin
