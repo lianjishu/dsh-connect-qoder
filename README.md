@@ -213,6 +213,24 @@ dsh plugin --profile web add <本仓库路径>
   权威写、本地写仅作镜像、写后读回确认」，保存按钮只会显示真实结果。在宿主未为本插件注册设置
   命名空间行的环境（如 `link:` 开发安装）下端点会 503，卡片如实显示失败而不是假"已保存"；
   正式（registry）安装下该端点可用。
+- **设置命名空间不存在时卡片是只读的，请改用 profile patch 表达设置**：宿主的可写命名空间
+  由 `settings.describe()` 列出，而 `describe()` 只收录 `fiber.runtime.Config` 存在且含 volatile
+  字段的 Loader 行。某些宿主版本上（实测 DSH NEXT `2.0.19-next`）本插件的行**不会**出现在该
+  列表里——此时卡片**不再**提供可点却存不下的开关，改为只读，并在控制台点名缺的是哪个命名空间。
+  三个设置字段都能在 profile 的 patch 层等价表达，**不依赖设置服务**：
+
+  ```yaml
+  # ~/.dsh/profiles/<profile>/cordis.patch.yml
+  - id: llm-qoder
+    config:
+      useMaximumContextWindow: true      # 用各模型声明的最宽窗口（Qoder 多为 200K/400K/1M，默认 200K）
+      # enabledModelIds: { qoder-cn: [DeepSeek-Flash, Qwen3.8-Max] }   # 逐区域模型白名单，空表示不过滤
+      # imageOverrides: { DeepSeek-Flash: "on" }                       # 逐模型图像输入 auto/on/off
+  ```
+
+  这条路径由 `loader/volatile-update` **热生效、无需重启**（实测 `contextWindow`
+  从 `200000` 变 `1000000`）。发现与验证记录见
+  [docs/issues/23-settings-namespace-never-served.md（宿主从未服务 llm-qoder 设置命名空间）](docs/issues/23-settings-namespace-never-served.md)。
 - **每日签到**：Qoder 每天 10:00（UTC+8）给每个账号发一轮 `CLAIM_BENEFIT` 活动，一轮只能领一次，
   重复领取是幂等的（`replayed`，不再发放）。卡片在「我的用量」**右侧**放一张签到小卡片 + 三态按钮
   （立即签到 / 签到中… / 今日已签到）——**只有你点才会领，插件不会自动签到**。每次点击都先重读一次
