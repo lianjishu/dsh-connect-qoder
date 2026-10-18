@@ -159,7 +159,6 @@ function apply(ctx: ClientContext) {
 		en
 	}), "dsh-connect-qoder: settings copy");
 	const t = ctx.locale.bind(namespace);
-	let settingsScope: SettingsScope | undefined;
 	// The settings surface, narrowed to the calls it is probed with.
 	// `SettingsScope` is this card's own type (declared with the card), so
 	// the cast below is where the harness's answer meets it — the same
@@ -200,24 +199,80 @@ function apply(ctx: ClientContext) {
 			return { served: false, hostRows: 0 };
 		}
 	};
-	const { served, hostRows } = namespaceServed();
-	if (served) {
-		settingsScope = forms?.get(namespace) as SettingsScope;
-	} else if (hostRows > 0) {
-		// A host serving OTHER rows while ours is missing is the anomaly worth
-		// naming: the card would offer controls whose every save is refused
-		// (the host's `__save` finds no row and answers 503). A host serving an
-		// empty list is the ordinary Loader-less case and stays silent — the
+	/**
+	 * Resolve the writable scope AT RENDER TIME, not once at load.
+	 *
+	 * `describe()` is a mirror of the Host's document, and that mirror is
+	 * populated asynchronously (`SettingsDescribeMirror.load`, driven by
+	 * `remote.settings.describe()`). Reading it once during `apply()` asks a
+	 * question the answer to which is not ready yet: this plugin's bundle is
+	 * LAST in `dsh.profile.bundles`, so at the moment the client half runs, the
+	 * mirror still holds the startup snapshot the earlier bundles loaded —
+	 * every one of the host's own namespaces, and none of the third-party rows
+	 * that had not activated yet.
+	 *
+	 * That is exactly what the 21-namespace console error described: a TRUE
+	 * snapshot of the wrong instant. Pinning `settingsScope` from it left the
+	 * card permanently read-only even though the row appears moments later.
+	 *
+	 * The slot's `inject` face is evaluated lazily by the renderer (once per
+	 * registered entry, cached on the entry), so resolving here means the card
+	 * sees whatever the mirror knows by the time it is actually mounted.
+	 */
+	const servedState = (): { served: boolean; hostRows: number } => namespaceServed();
+	/**
+	 * Whether the "serving other rows, but not ours" warning has been raised.
+	 *
+	 * That condition is a standing one — the Loader row id drifted, or the host
+	 * never created the namespace — and it deserves a name in the console. But
+	 * the same list is briefly incomplete on every cold start, so raising it at
+	 * the first mount would cry wolf. `reportUnserved` is called from a timer
+	 * after activation settles (see below), where an absence is real.
+	 */
+	let warnedUnserved = false;
+	/**
+	 * The scope to hand the card, or `undefined` for the read-only path.
+	 *
+	 * Deliberately silent: a mount that happens before the mirror settles is
+	 * normal, and the standing-condition warning is raised once by
+	 * {@link reportUnserved} instead.
+	 */
+	const liveScope = (): SettingsScope | undefined => {
+		if (forms === void 0) return undefined;
+		return servedState().served ? (forms.get(namespace) as SettingsScope) : undefined;
+	};
+	/**
+	 * Name the standing anomaly once, after the document has had time to settle.
+	 *
+	 * `describe()` lists the ACTIVE profile entries that produced a volatile
+	 * form. A namespace missing from it long after boot means this plugin's row
+	 * is not configurable at all — either its Loader row id drifted from
+	 * `PROVIDER_NS` (the failure `plugins/issues/14` catalogued) or the host
+	 * never created the row (the Loader-less case, which is normal only when the
+	 * whole list is empty).
+	 *
+	 * The delay is the point. Reading the mirror synchronously in `apply()` is
+	 * what produced the false alarm this plugin shipped: this bundle is last in
+	 * `dsh.profile.bundles`, so at client boot the mirror still holds the
+	 * snapshot the earlier bundles loaded and our own row has not appeared yet.
+	 */
+	const reportUnserved = (): void => {
+		if (warnedUnserved) return;
+		const { served, hostRows } = servedState();
+		if (served) return;
+		// An EMPTY list is the ordinary Loader-less host and stays silent — the
 		// same rule `resolveNamespace` follows above.
+		if (hostRows === 0) return;
+		warnedUnserved = true;
 		console.error(
 			`[dsh-connect-qoder] the host serves ${hostRows} settings namespace(s) but not ` +
 				`"${namespace}"; the card stays read-only (its saves would be refused). ` +
 				`Set these fields declaratively in the profile patch instead — see README.`,
 		);
-	}
+	};
 	// A host that does not serve the namespace gets a read-only card:
-	// `settingsScope` stays undefined and the slot registration degrades to
-	// `{ t }` — the existing degraded path, not an error.
+	// `settingsScope` is absent and the slot registration degrades to `{ t }` —
+	// the existing degraded path, not an error.
 	/**
 	 * FIX 0.1.7: the plugin-manager detail page renders a bundle's config
 	 * card from the `plugins.bundle.config` slot (and a row's from
@@ -239,11 +294,13 @@ function apply(ctx: ClientContext) {
 				name: slotName,
 				key,
 				priority: 30,
-				inject: () => settingsScope === void 0 ? {
-					t
-				} : {
-					t,
-					settingsScope
+				// Evaluated lazily by the renderer when the card is mounted, so
+				// this reads the settings mirror at MOUNT time — not at the
+				// instant the client half booted, which is earlier than the
+				// first `remote.settings.describe()` answer.
+				inject: () => {
+					const scope = liveScope();
+					return scope === void 0 ? { t } : { t, settingsScope: scope };
 				}
 			}, QoderPluginCard));
 		} catch (error) {
@@ -272,6 +329,30 @@ function apply(ctx: ClientContext) {
 		}, ComposerUsagePill));
 	} catch (error) {
 		console.error(`[dsh-connect-qoder] composer pill slot failed to register (host provider unaffected):`, error);
+	}
+	// Raise the standing "not served" anomaly once the document has had time to
+	// settle. `setTimeout(0)` is the shortest defer that leaves the current task
+	// queue — which is all that is needed to get past the synchronous part of
+	// boot. A later second look covers the case where the first answer was still
+	// the pre-activation snapshot: by then the mirror has re-read at least once.
+	//
+	// Registered through `ctx.effect` so the timers die with the plugin instead
+	// of firing into a torn-down context. `ctx.effect` accepts the disposer form
+	// everywhere this client targets, and the callbacks themselves are guarded by
+	// `warnedUnserved`, so a double mount cannot double-log.
+	try {
+		ctx.effect(() => {
+			const first = setTimeout(reportUnserved, 0);
+			const second = setTimeout(reportUnserved, 4000);
+			return () => {
+				clearTimeout(first);
+				clearTimeout(second);
+			};
+		}, "dsh-connect-qoder: unserved-namespace warning");
+	} catch (error) {
+		// The warning is diagnostic, never load-bearing: a host whose `effect`
+		// rejects a disposer must still keep the card. Say so rather than vanish.
+		console.error("[dsh-connect-qoder] could not schedule the settings-surface check:", error);
 	}
 	} catch (error) {
 		console.error("[dsh-connect-qoder] client card failed to load (host provider unaffected):", error);

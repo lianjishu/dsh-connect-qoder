@@ -2,6 +2,33 @@
 
 **P1 · 规模 M · 依赖 —（需先与宿主侧确认 `settings.configure()` 的注册契约）**
 
+> ## ⚠️ 后续更正（2026-10-18，本文件的核心判断已被实测推翻）
+>
+> 本文把这条 `console.error`（"21 个命名空间里没有本插件"）当成了**稳定态**，
+> 据此断言"宿主**从未**服务 `llm-qoder`"，并把修法定在"判据改用 `describe()`"。
+> 后来的取证表明：**那份 21 条清单是启动瞬间的快照，不是稳定态。**
+>
+> - 本插件 bundle 在 `dsh.profile.bundles` 里**排在最后**；
+> - `configForms.describe()` 是 `SettingsDescribeMirror` 的**异步镜像**，由
+>   `remote.settings.describe()` 填充；在 `apply()` 执行的那一刻，镜像里装的还是
+>   更早激活的 bundle 加载到的那一份 —— 宿主自带的 21 条，**没有第三方行**；
+> - 日志时序印证：`06:20:30.566` 客户端读出 21 条，`06:20:30.843` 本插件自己的
+>   `activate()` 才刚跑到「无本地登录」—— 读的时刻**本插件还没激活完**。
+>
+> 所以真正的问题是**读得太早**，而不是宿主不服务。用宿主自带 schemastery
+> 3.18.5 复现 `volatileForm(Config)` 已确认：四个字段全部 volatile、`describe()`
+> 的准入谓词**全部通过**，schema 这一侧根本没问题。
+>
+> 修法随之改为：把 `settingsScope` 的解析从 `apply()` 时刻**推迟到 slot 的
+> `inject` 面求值时刻**（渲染器在挂载时惰性调用它，见
+> `dsh-client-ui-renderer` 的 `runInject`/`cachedRootInject`），并在激活稳定后
+> 才报"持续未服务"的异常。回归测试见 `test/client-locale.test.js` 的
+> `a namespace that appears after boot still makes the card writable`
+> （已做变异验证：改回启动时固化即变红）。
+>
+> 下文保留原始推理，作为"为什么只读一次快照会得出错误结论"的记录；
+> §修法 B（宿主侧 `configure()` 读回校验）仍然有效且已落地。
+
 ## 症状
 
 DSH NEXT desktop `2.0.19-next` + `@eghrhegpe/dsh-connect-qoder@0.7.0`，

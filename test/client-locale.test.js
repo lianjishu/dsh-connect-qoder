@@ -66,7 +66,7 @@ assert.ok(
  * serve. Everything the card touches at load time is stubbed; the card body is
  * never rendered, only `apply()` is run.
  */
-function loadClient({ servedNamespace, servedNamespaces, captureSlots = false }) {
+function loadClient({ servedNamespace, servedNamespaces, captureSlots = false, mutable = false }) {
   const registered = []
   const bound = []
   const describeCalls = []
@@ -76,7 +76,12 @@ function loadClient({ servedNamespace, servedNamespaces, captureSlots = false })
   // `servedNamespaces` drives the multi-namespace case (a host serving rows that
   // are none of ours); `servedNamespace` keeps the single-row cases terse, and
   // `null` still means "the host serves nothing at all".
-  const namespaceList = servedNamespaces !== undefined
+  //
+  // `mutable` makes the list assignable through the returned handle, so a test
+  // can model the real sequence: the first read happens at client boot (before
+  // this plugin's Loader row has activated), a later read sees it. That timing
+  // is the defect the "grows after boot" test below exists to pin.
+  let namespaceList = servedNamespaces !== undefined
     ? servedNamespaces.map((ns) => ({ ns }))
     : servedNamespace === null ? [] : [{ ns: servedNamespace }]
 
@@ -84,11 +89,19 @@ function loadClient({ servedNamespace, servedNamespaces, captureSlots = false })
   console.error = (...args) => { logged.push(args.map(String).join(' ')) }
 
   const forms = {
+    // The real `describe()` returns a snapshot STORE: `getSnapshot()` is read
+    // fresh on every call, which is what lets a caller see a later answer.
+    // Returning the same object here would make the mirror look frozen and
+    // would hide exactly the bug this is modelling.
     describe: () => {
       describeCalls.push(true)
       return { getSnapshot: () => ({ view: { namespaces: namespaceList } }) }
     },
     get: (ns) => ({ __scopeFor: ns }),
+  }
+  /** Replace what the host serves, as a later mirror read would observe. */
+  const setServed = (names) => {
+    namespaceList = names === null ? [] : names.map((ns) => ({ ns }))
   }
 
   const ctx = {
@@ -109,14 +122,19 @@ function loadClient({ servedNamespace, servedNamespaces, captureSlots = false })
     slots: {
       // `inject(slotName, callback)` runs the callback to obtain a registration;
       // the card's `registerCard` calls `ctx.slots.register({ …, inject }, Card)`.
-      // Capturing the `inject` payload is how a test observes whether the card
-      // was handed a writable `settingsScope` — the DOM-level consequence
-      // (save button enabled vs disabled) keys on exactly that value.
+      //
+      // The registration's `inject` FACE is captured as a thunk rather than
+      // called here. That is the whole point: the real renderer evaluates it
+      // lazily at mount (`runInject`/`cachedRootInject` in
+      // dsh-client-ui-renderer), so calling it at registration time would make
+      // the test observe the boot-time answer and would fail to model the bug
+      // where a namespace only appears after boot. Each captured `inject` is
+      // therefore a zero-argument function the test calls when it means "mount".
       inject: (slotName, callback) => {
         if (captureSlots) {
           const registerWith = {
             register: (slot) => {
-              slots.push({ slotName, inject: typeof slot.inject === 'function' ? slot.inject() : slot.inject })
+              slots.push({ slotName, inject: () => (typeof slot.inject === 'function' ? slot.inject() : slot.inject) })
               return undefined
             },
             inject: () => undefined,
@@ -128,7 +146,7 @@ function loadClient({ servedNamespace, servedNamespaces, captureSlots = false })
         return undefined
       },
       register: (slot) => {
-        if (captureSlots) slots.push({ slotName: slot.name, inject: typeof slot.inject === 'function' ? slot.inject() : slot.inject })
+        if (captureSlots) slots.push({ slotName: slot.name, inject: () => (typeof slot.inject === 'function' ? slot.inject() : slot.inject) })
         return undefined
       },
     },
@@ -177,7 +195,7 @@ function loadClient({ servedNamespace, servedNamespaces, captureSlots = false })
     console.error = realError
   }
 
-  return { registered, bound, describeCalls, logged, slots }
+  return { registered, bound, describeCalls, logged, slots, setServed }
 }
 
 test('a host serving rows, none of them ours, is named instead of silently taken over', () => {
@@ -263,7 +281,7 @@ test('a namespace the host does not serve leaves the card read-only', () => {
     captureSlots: true,
   })
 
-  const withScope = slots.filter((s) => s.inject?.settingsScope !== undefined)
+  const withScope = slots.filter((s) => s.inject().settingsScope !== undefined)
   assert.deepEqual(
     withScope.map((s) => s.slotName),
     [],
@@ -271,7 +289,7 @@ test('a namespace the host does not serve leaves the card read-only', () => {
       'every save through it is refused with 503, so the controls must stay read-only',
   )
 
-  const withCopy = slots.filter((s) => s.inject?.t !== undefined)
+  const withCopy = slots.filter((s) => s.inject().t !== undefined)
   assert.ok(withCopy.length > 0, 'the card must still register (degraded, not broken)')
 })
 
@@ -280,10 +298,89 @@ test('a served namespace does hand the card its settings scope', () => {
   // granting a scope at all — which would make the card permanently read-only.
   const { slots } = loadClient({ servedNamespace: HOST_NAMESPACE, captureSlots: true })
 
-  const withScope = slots.filter((s) => s.inject?.settingsScope !== undefined)
+  const withScope = slots.filter((s) => s.inject().settingsScope !== undefined)
   assert.ok(
     withScope.length > 0,
     `no slot received a settingsScope even though "${HOST_NAMESPACE}" is served; got ${JSON.stringify(slots.map((s) => s.slotName))}`,
+  )
+})
+
+/**
+ * The defect that made every cold start report a missing namespace.
+ *
+ * `describe()` is a client mirror filled asynchronously from
+ * `remote.settings.describe()`. This bundle is LAST in `dsh.profile.bundles`,
+ * so the answer read during `apply()` is the snapshot the earlier bundles
+ * loaded — all of the host's own namespaces, and not yet this plugin's row,
+ * whose Loader entry has not finished activating.
+ *
+ * Pinning `settingsScope` from that first read left the card read-only for the
+ * whole session even though the row appeared moments later. The fix resolves
+ * the scope inside the slot's `inject` face, which the renderer evaluates
+ * lazily at mount time.
+ *
+ * This test models the real order of events:
+ *   1. boot: the mirror knows only the host's rows      -> apply() runs here
+ *   2. the row activates; the next mirror read sees it  -> the card mounts here
+ * and asserts the card is writable at mount, which is when it matters.
+ */
+test('a namespace that appears after boot still makes the card writable', () => {
+  // Boot: exactly the shape the 21-namespace console error described.
+  const { slots, setServed, logged } = loadClient({
+    servedNamespaces: ['llm-pi-ai', 'agent-loop', 'ui-chat'],
+    captureSlots: true,
+    mutable: true,
+  })
+
+  // The deferred "standing anomaly" check must not have fired for this: the
+  // absence at boot is a timing artifact, not a drifted Loader row id. The
+  // timers are scheduled but the test never advances them, which mirrors a
+  // mount that happens well before any such delay.
+  assert.equal(slots.length > 0, true, 'the card never registered')
+
+  // The row activates; the mirror re-reads and now lists our namespace.
+  setServed([...['llm-pi-ai', 'agent-loop', 'ui-chat'], HOST_NAMESPACE])
+
+  // Mount time: the slot's `inject` face is evaluated NOW, not at boot.
+  const injectedAtMount = slots
+    .filter((s) => s.slotName === 'plugins.bundle.config')
+    .map((s) => s.inject())
+
+  assert.ok(injectedAtMount.length > 0, 'the bundle config slot was never registered')
+  const writable = injectedAtMount.filter((face) => face?.settingsScope !== undefined)
+  assert.ok(
+    writable.length > 0,
+    'the card resolved its scope at boot and cached the read-only answer: a namespace ' +
+      'that only appears after this plugin’s Loader row activates must still make the ' +
+      'card writable, or every user sees a permanently read-only card on a host that ' +
+      'serves the namespace perfectly well',
+  )
+})
+
+test('the read-only card is still read-only when the namespace never appears', () => {
+  // The other half of the same contract: deferring the resolution must not turn
+  // the gate into "always writable". This is the shape that must stay refused —
+  // resolves at mount, finds nothing, degrades.
+  const { slots, setServed } = loadClient({
+    servedNamespaces: ['llm-pi-ai', 'agent-loop', 'ui-chat'],
+    captureSlots: true,
+    mutable: true,
+  })
+  setServed(['llm-pi-ai', 'agent-loop', 'ui-chat']) // unchanged: still not ours
+
+  const injectedAtMount = slots
+    .filter((s) => s.slotName === 'plugins.bundle.config')
+    .map((s) => s.inject())
+  const writable = injectedAtMount.filter((face) => face?.settingsScope !== undefined)
+  assert.deepEqual(
+    writable,
+    [],
+    'a namespace the host does not serve must not hand the card a writable scope — ' +
+      'every save through it would be refused with 503',
+  )
+  assert.ok(
+    injectedAtMount.every((face) => typeof face?.t === 'function'),
+    'the card must still register with its translation function (degraded, not broken)',
   )
 })
 
