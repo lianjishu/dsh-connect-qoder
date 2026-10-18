@@ -144,17 +144,28 @@ test('the served settings namespace is the Loader row id, in every place it is w
 
 test('the host fallback namespace is the one the client falls back to', () => {
   // The second copy of the pair: the host's `settingsNamespaceOf` fallback and
-  // the client's `resolveNamespace` fallback are the same string, and both are
-  // reached when a host mounts the plugin with no Loader entry. If they drift,
-  // a Loader-less host serves one namespace while the card registers under
-  // another — invisible, again.
+  // the client's fallback are the same string, and both are reached when a host
+  // mounts the plugin with no Loader entry. If they drift, a Loader-less host
+  // serves one namespace while the card registers under another — invisible,
+  // again.
   const hostSource = readFileSync(join(root, 'src', 'host', 'index.ts'), 'utf8')
   const hostFallback = hostSource.match(/export const QODER_SETTINGS_NS = '([^']+)'/)
   assert.ok(hostFallback, 'src/host/index.ts must declare QODER_SETTINGS_NS')
 
+  // The client names it ONCE, at module scope, as `FALLBACK_NS`; the candidate
+  // pair inside `resolveNamespace` reads that constant rather than repeating a
+  // literal. Anchoring on the declaration is therefore stricter than matching a
+  // local `const fallback = "…"` would be: a second literal cannot be introduced
+  // without this test losing its anchor, and the single spelling is the whole
+  // point (`docs/issues/14`).
   const clientSource = readFileSync(join(root, 'src', 'client', 'index.ts'), 'utf8')
-  const clientFallback = clientSource.match(/const fallback = "([^"]+)"/)
-  assert.ok(clientFallback, 'src/client/index.ts must declare its resolveNamespace fallback')
+  const clientFallback = clientSource.match(/const FALLBACK_NS = "([^"]+)"/)
+  assert.ok(clientFallback, 'src/client/index.ts must declare its FALLBACK_NS fallback')
+  assert.equal(
+    clientSource.match(/const fallback = "([^"]+)"/),
+    null,
+    'src/client/index.ts must not repeat the fallback as a second literal — read FALLBACK_NS',
+  )
 
   assert.equal(
     clientFallback[1],

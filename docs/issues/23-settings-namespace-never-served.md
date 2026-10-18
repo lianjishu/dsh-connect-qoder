@@ -26,6 +26,37 @@
 > `a namespace that appears after boot still makes the card writable`
 > （已做变异验证：改回启动时固化即变红）。
 >
+> ### 第二次更正（同日重启实测后：上一版只修了一半）
+>
+> 重启后的日志给出了反证：
+>
+> ```text
+> 07:19:45 dsh-connect-qoder: the settings namespace "llm-qoder" is absent from describe() ...
+> 07:19:50 [dsh-connect-qoder] the host serves 22 settings namespace(s) but not "dsh-connect-qoder" ...
+> ```
+>
+> 两处变化很关键：
+>
+> 1. 计数从 **21 变成 22** —— 我们的行**出现了**；
+> 2. 这次**没有**那条带完整清单的详细报错，说明 `resolveNamespace()` 在启动时读到的是
+>    **空列表**，于是静默回落到 `dsh-connect-qoder`。
+>
+> 于是 `namespace` 这个变量本身也是**启动时固化**的：延迟检查拿冻结的
+> `dsh-connect-qoder` 去比对，而宿主实际服务的是 Loader 行 id `llm-qoder`，
+> 两个**拼法不同**，所以明明在 22 条里也报"缺失"。
+>
+> 修法：`servedRow()` **每次求值都重读** `describe()`，并按候选对
+> （`PROVIDER_NS` 优先，`FALLBACK_NS` 兜底）解析出**宿主实际服务的那个 ns**，
+> 用它去 `forms.get(ns)`；报错文本也改为**列出收到的 ns 清单**而不只报计数——
+> 正是"只报 22 个"让上一版把"存在"读成了"缺失"。`FALLBACK_NS` 同时提到模块作用域，
+> 与 `resolveNamespace` 的候选对共用一处拼写（issue 14 的老规矩）。
+>
+> 回归测试：`a namespace served under the Loader id is found after an empty first read`。
+> 这条用例特意让宿主服务的名字（`llm-qoder`，读自 `cordis.patch.yml`）与 fallback
+> （`dsh-connect-qoder`，读自 `src/host/index.ts`）**不同**，并断言二者不等 ——
+> 否则用 fallback 拼法去服务时两个名字会相等，带 bug 也能通过。已做变异验证：
+> 改回"比对冻结的 `namespace`"立刻变红。
+>
 > 下文保留原始推理，作为"为什么只读一次快照会得出错误结论"的记录；
 > §修法 B（宿主侧 `configure()` 读回校验）仍然有效且已落地。
 

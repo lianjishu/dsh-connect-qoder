@@ -54,6 +54,25 @@ const BUNDLE = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
 const HOST_NAMESPACE = /export const QODER_SETTINGS_NS = '([^']+)'/
   .exec(readFileSync(join(root, 'src', 'host', 'index.ts'), 'utf8'))?.[1]
 
+/**
+ * The row id the Loader actually registers this plugin under — the id the host
+ * derives the settings namespace FROM, and therefore what `describe()` reports
+ * on a real profile.
+ *
+ * Distinct from {@link HOST_NAMESPACE}, which is the service's fallback for a
+ * host that mounts the plugin with no Loader entry. Reading the two apart is the
+ * whole reason the cold-start case below can tell a stale fallback from the row
+ * the host serves: they are different strings, and the shipped bug compared
+ * against the wrong one.
+ */
+const LOADER_ROW_ID = /^\s*-\s*id:\s*(\S+)\s*$/m
+  .exec(readFileSync(join(root, 'cordis.patch.yml'), 'utf8'))?.[1]
+
+assert.ok(
+  LOADER_ROW_ID !== undefined,
+  'could not read the Loader row id from cordis.patch.yml — this test keys on it',
+)
+
 assert.ok(
   HOST_NAMESPACE !== undefined,
   'could not read QODER_SETTINGS_NS from src/host/index.ts — this test keys on it',
@@ -381,6 +400,61 @@ test('the read-only card is still read-only when the namespace never appears', (
   assert.ok(
     injectedAtMount.every((face) => typeof face?.t === 'function'),
     'the card must still register with its translation function (degraded, not broken)',
+  )
+})
+
+/**
+ * The cold-start shape actually observed on DSH NEXT 2.0.19-next.
+ *
+ * The mirror had not loaded when the client half ran, so the first read answered
+ * an EMPTY list — indistinguishable, at that instant, from a Loader-less host.
+ * `resolveNamespace()` therefore returned its `dsh-connect-qoder` fallback, and a
+ * later check that compared against that FROZEN value reported "22 namespaces
+ * served, ours missing" even though the row was among them: the count had gone
+ * 21 -> 22, the row had appeared, and only the name being compared was stale.
+ *
+ * The row id matters here. On a real profile the host serves this plugin under
+ * its Loader entry id (`llm-qoder`), NOT under the `dsh-connect-qoder` fallback
+ * the empty first read produces — which is exactly why comparing against the
+ * frozen value reported a false absence. This case therefore serves it under
+ * `LOADER_ROW_ID` rather than `HOST_NAMESPACE`; using the fallback spelling would
+ * make the two names equal and the test would pass with the bug present.
+ */
+test('a namespace served under the Loader id is found after an empty first read', () => {
+  // Boot: the mirror has nothing at all yet — the real cold-start answer.
+  const { slots, setServed } = loadClient({
+    servedNamespace: null,
+    captureSlots: true,
+    mutable: true,
+  })
+  assert.ok(slots.length > 0, 'the card never registered')
+  assert.notEqual(
+    LOADER_ROW_ID,
+    HOST_NAMESPACE,
+    'this test only distinguishes a stale fallback from the served row when the two ' +
+      'spellings differ; check the Loader row id in cordis.patch.yml',
+  )
+
+  // The mirror loads; the row is served under the Loader entry id.
+  setServed(['llm-pi-ai', 'agent-loop', 'ui-chat', LOADER_ROW_ID])
+
+  const injectedAtMount = slots
+    .filter((s) => s.slotName === 'plugins.bundle.config')
+    .map((s) => s.inject())
+  const writable = injectedAtMount.filter((face) => face?.settingsScope !== undefined)
+
+  assert.ok(
+    writable.length > 0,
+    'a card whose first describe() answered an EMPTY list must still become writable ' +
+      'once the mirror loads — the empty answer is a Loader-less host only if it stays empty',
+  )
+  // The scope must be bound to the served row, not to the fallback the empty read
+  // produced: writing through "dsh-connect-qoder" on a host that serves
+  // "llm-qoder" is a 503 on every save.
+  assert.deepEqual(
+    writable.map((face) => face.settingsScope.__scopeFor),
+    writable.map(() => LOADER_ROW_ID),
+    `the card wrote through a namespace the host does not serve; served "${LOADER_ROW_ID}"`,
   )
 })
 
