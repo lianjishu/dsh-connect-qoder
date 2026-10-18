@@ -323,6 +323,44 @@ function apply(ctx: ClientContext) {
 		registerCard("plugins.row.config", `${bundle}#${PROVIDER_NS}`);
 	}
 	registerCard("settings.plugin.item", "qoder");
+	/**
+	 * The Settings page's own nav entry — `设置 → Qoder`.
+	 *
+	 * This is the seat that was missing: the plugin registered its card into the
+	 * Plugins page (`plugins.bundle.config` / `plugins.row.config`) and into the
+	 * legacy `settings.plugin.item`, but never into `settings.section`, which is
+	 * the list the Settings shell renders its LEFT NAV from. So the card existed
+	 * only after navigating into Plugins and opening the bundle or a row, and the
+	 * Settings sidebar had no Qoder row at all.
+	 *
+	 * A third-party bundle CAN own this seat — the seat is a plain list slot with
+	 * an `id`/`order`/`label` contract, and other plugins on this machine already
+	 * use it that way. `id` must be ours alone (reusing a shipped id would replace
+	 * that section), and `label` is a thunk so switching language re-reads it
+	 * without re-registering.
+	 *
+	 * The `inject` face is the same one the Plugins-page card uses, so the section
+	 * resolves the settings row at MOUNT time and degrades to a read-only card when
+	 * the host serves no such row (see `liveScope` above).
+	 */
+	try {
+		ctx.slots.inject("settings.section", () => ctx.slots.register({
+			name: "settings.section",
+			id: "qoder",
+			// After the shipped sections (general 0, models 10, plugins 15) and in
+			// the same neighbourhood as other third-party ones, so this never
+			// displaces a host-owned page.
+			order: 60,
+			label: () => t("row.navLabel"),
+			locale: namespace,
+			inject: () => {
+				const scope = liveScope();
+				return scope === void 0 ? { t } : { t, settingsScope: scope };
+			}
+		}, QoderPluginCard));
+	} catch (error) {
+		console.error(`[dsh-connect-qoder] settings section failed to register (host provider unaffected):`, error);
+	}
 	// 对话框用量胶囊（composer-usage-pill.tsx）：输入框工具栏 `conversation.input.right`
 	// 座席。`useProjection` 是 renderer 物化注入的 session 作用域标准 prop（严格必需，
 	// 见 test/composer-pill.test.js），这里的 inject 只补本插件字典 `t`。注册失败

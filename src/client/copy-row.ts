@@ -1,5 +1,8 @@
 /** Simplified Chinese — model row copy. */
 export const zhRow = {
+	// Settings nav row label. Short on purpose: the nav column is narrow, and the
+	// full product name ("接入 Qoder 积分与模型") belongs on the card itself.
+	"row.navLabel": "Qoder",
 	"row.title": "接入 Qoder 积分与模型 (dsh-connect-qoder)",
 	"row.desc": "使用本机已登录的 Qoder（国内版 / 国际版）模型；图像输入可以按模型逐个设置。",
 	"row.expand": "展开",
@@ -92,6 +95,9 @@ export const zhRow = {
 };
 /** English — model row copy. */
 export const enRow = {
+	// Settings nav row label — the product name, matching the zh entry and the
+	// card's own "Qoder" identity. The long title stays on the card.
+	"row.navLabel": "Qoder",
 	"row.title": "Connect Qoder credits and models (dsh-connect-qoder)",
 	"row.desc": "Use the Qoder models already signed in on this machine (Qoder CN / Qoder); image input is decided per model.",
 	"row.expand": "Expand",

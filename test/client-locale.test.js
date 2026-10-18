@@ -85,6 +85,23 @@ assert.ok(
  * serve. Everything the card touches at load time is stubbed; the card body is
  * never rendered, only `apply()` is run.
  */
+/**
+ * The slots this plugin is allowed to register into.
+ *
+ * Mirrors the host's declared seats: the Settings shell's nav list
+ * (`settings.section`), the Plugins page's bundle/row configuration seats, the
+ * legacy plugin item, and the composer toolbar. A registration under any OTHER
+ * name is never dispatched by the real renderer, so the stub below drops it
+ * rather than recording a contribution that would never be mounted.
+ */
+const KNOWN_SLOTS = new Set([
+  'settings.section',
+  'plugins.bundle.config',
+  'plugins.row.config',
+  'settings.plugin.item',
+  'conversation.input.right',
+])
+
 function loadClient({ servedNamespace, servedNamespaces, captureSlots = false, mutable = false }) {
   const registered = []
   const bound = []
@@ -151,9 +168,16 @@ function loadClient({ servedNamespace, servedNamespaces, captureSlots = false, m
       // therefore a zero-argument function the test calls when it means "mount".
       inject: (slotName, callback) => {
         if (captureSlots) {
+          // The real renderer dispatches by slot NAME against the slots the host
+          // declares; a registration under a name nobody declared is never
+          // mounted. This stub has to be just as strict, or a typo in the slot
+          // name would be captured here and every assertion built on it would
+          // pass while the real UI showed nothing. `SETTINGS_SECTION` is the one
+          // name this file asserts on; the rest are the plugin's own seats.
+          if (!KNOWN_SLOTS.has(slotName)) return undefined
           const registerWith = {
             register: (slot) => {
-              slots.push({ slotName, inject: () => (typeof slot.inject === 'function' ? slot.inject() : slot.inject) })
+              slots.push({ slotName, registration: slot, inject: () => (typeof slot.inject === 'function' ? slot.inject() : slot.inject) })
               return undefined
             },
             inject: () => undefined,
@@ -165,7 +189,10 @@ function loadClient({ servedNamespace, servedNamespaces, captureSlots = false, m
         return undefined
       },
       register: (slot) => {
-        if (captureSlots) slots.push({ slotName: slot.name, inject: () => (typeof slot.inject === 'function' ? slot.inject() : slot.inject) })
+        if (captureSlots) {
+          if (!KNOWN_SLOTS.has(slot.name)) return undefined
+          slots.push({ slotName: slot.name, registration: slot, inject: () => (typeof slot.inject === 'function' ? slot.inject() : slot.inject) })
+        }
         return undefined
       },
     },
@@ -455,6 +482,62 @@ test('a namespace served under the Loader id is found after an empty first read'
     writable.map((face) => face.settingsScope.__scopeFor),
     writable.map(() => LOADER_ROW_ID),
     `the card wrote through a namespace the host does not serve; served "${LOADER_ROW_ID}"`,
+  )
+})
+
+/**
+ * The Settings sidebar entry.
+ *
+ * The Settings shell builds its LEFT NAV from the `settings.section` list slot.
+ * This plugin registered its card into the Plugins page
+ * (`plugins.bundle.config` / `plugins.row.config`) and into the legacy
+ * `settings.plugin.item` seat, but never into `settings.section` — so the card
+ * could only be reached by navigating into Plugins and opening the bundle or one
+ * of its rows, and "设置" itself had no Qoder row. That is the reported symptom:
+ * 设置页里看不到 Qoder.
+ *
+ * A third-party bundle can own this seat: it is a plain list slot whose options
+ * are `id` / `order` / `label`, and the contract requires an id of our own (a
+ * shipped id would be REPLACED, not added beside).
+ */
+test('the card is reachable from the Settings sidebar, not only from Plugins', () => {
+  const { slots } = loadClient({ servedNamespace: LOADER_ROW_ID, captureSlots: true })
+
+  const section = slots.filter((s) => s.slotName === 'settings.section')
+  assert.ok(
+    section.length > 0,
+    'nothing is registered into `settings.section`, so the Settings sidebar shows no ' +
+      'Qoder row: the card is then reachable only through the Plugins page',
+  )
+
+  // The section must carry its own nav identity: an id the shell can filter by,
+  // and a label it can project. A registration without them renders no nav cell.
+  const ids = section.map((s) => s.registration?.id)
+  assert.ok(
+    ids.every((id) => typeof id === 'string' && id.length > 0),
+    `the settings section has no nav id, so no cell is drawn: ${JSON.stringify(ids)}`,
+  )
+  // Our id, not a shipped one: reusing e.g. "plugins" would hijack that section.
+  assert.deepEqual(
+    ids,
+    ['qoder'],
+    'the settings section must register under this plugin’s own id, never a shipped one',
+  )
+
+  // The label is what the user reads in the nav column; a missing one leaves a
+  // blank row.
+  const labels = section.map((s) => s.registration?.label)
+  assert.ok(
+    labels.every((label) => typeof label === 'function' || typeof label === 'string'),
+    `the settings section has no label, so the nav row would be blank: ${JSON.stringify(labels)}`,
+  )
+
+  // And it must hand the card the same face the Plugins-page seat does, or the
+  // Settings page would render a card with no translation function.
+  const faces = section.map((s) => s.inject())
+  assert.ok(
+    faces.every((face) => typeof face?.t === 'function'),
+    'the settings section does not provide `t`, so the card cannot render there',
   )
 })
 
